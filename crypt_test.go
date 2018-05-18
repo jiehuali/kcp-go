@@ -2,11 +2,21 @@ package kcp
 
 import (
 	"bytes"
+	"crypto/md5"
 	"crypto/rand"
+	"crypto/sha1"
 	"hash/crc32"
 	"io"
 	"testing"
 )
+
+func TestSM4(t *testing.T) {
+	bc, err := NewSM4BlockCrypt(pass[:16])
+	if err != nil {
+		t.Fatal(err)
+	}
+	cryptTest(t, bc)
+}
 
 func TestAES(t *testing.T) {
 	bc, err := NewAESBlockCrypt(pass[:32])
@@ -98,6 +108,14 @@ func cryptTest(t *testing.T, bc BlockCrypt) {
 	if !bytes.Equal(data, dec) {
 		t.Fail()
 	}
+}
+
+func BenchmarkSM4(b *testing.B) {
+	bc, err := NewSM4BlockCrypt(pass[:16])
+	if err != nil {
+		b.Fatal(err)
+	}
+	benchCrypt(b, bc)
 }
 
 func BenchmarkAES128(b *testing.B) {
@@ -218,5 +236,41 @@ func BenchmarkCRC32(b *testing.B) {
 	b.SetBytes(int64(len(content)))
 	for i := 0; i < b.N; i++ {
 		crc32.ChecksumIEEE(content)
+	}
+}
+
+func BenchmarkCsprngSystem(b *testing.B) {
+	data := make([]byte, md5.Size)
+	b.SetBytes(int64(len(data)))
+
+	for i := 0; i < b.N; i++ {
+		io.ReadFull(rand.Reader, data)
+	}
+}
+
+func BenchmarkCsprngMD5(b *testing.B) {
+	var data [md5.Size]byte
+	b.SetBytes(md5.Size)
+
+	for i := 0; i < b.N; i++ {
+		data = md5.Sum(data[:])
+	}
+}
+func BenchmarkCsprngSHA1(b *testing.B) {
+	var data [sha1.Size]byte
+	b.SetBytes(sha1.Size)
+
+	for i := 0; i < b.N; i++ {
+		data = sha1.Sum(data[:])
+	}
+}
+
+func BenchmarkCsprngMD5AndSystem(b *testing.B) {
+	var ng nonceMD5
+
+	b.SetBytes(md5.Size)
+	data := make([]byte, md5.Size)
+	for i := 0; i < b.N; i++ {
+		ng.Fill(data)
 	}
 }

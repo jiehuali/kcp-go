@@ -22,8 +22,8 @@ type (
 		data  []byte
 	}
 
-	// FECDecoder for decoding incoming packets
-	FECDecoder struct {
+	// fecDecoder for decoding incoming packets
+	fecDecoder struct {
 		rxlimit      int // queue size limit
 		dataShards   int
 		parityShards int
@@ -34,12 +34,15 @@ type (
 		decodeCache [][]byte
 		flagCache   []bool
 
+		// zeros
+		zeros []byte
+
 		// RS decoder
 		codec reedsolomon.Encoder
 	}
 )
 
-func newFECDecoder(rxlimit, dataShards, parityShards int) *FECDecoder {
+func newFECDecoder(rxlimit, dataShards, parityShards int) *fecDecoder {
 	if dataShards <= 0 || parityShards <= 0 {
 		return nil
 	}
@@ -47,23 +50,24 @@ func newFECDecoder(rxlimit, dataShards, parityShards int) *FECDecoder {
 		return nil
 	}
 
-	fec := new(FECDecoder)
-	fec.rxlimit = rxlimit
-	fec.dataShards = dataShards
-	fec.parityShards = parityShards
-	fec.shardSize = dataShards + parityShards
-	enc, err := reedsolomon.New(dataShards, parityShards, reedsolomon.WithMaxGoroutines(1))
+	dec := new(fecDecoder)
+	dec.rxlimit = rxlimit
+	dec.dataShards = dataShards
+	dec.parityShards = parityShards
+	dec.shardSize = dataShards + parityShards
+	codec, err := reedsolomon.New(dataShards, parityShards)
 	if err != nil {
 		return nil
 	}
-	fec.codec = enc
-	fec.decodeCache = make([][]byte, fec.shardSize)
-	fec.flagCache = make([]bool, fec.shardSize)
-	return fec
+	dec.codec = codec
+	dec.decodeCache = make([][]byte, dec.shardSize)
+	dec.flagCache = make([]bool, dec.shardSize)
+	dec.zeros = make([]byte, mtuLimit)
+	return dec
 }
 
 // decodeBytes a fec packet
-func (dec *FECDecoder) decodeBytes(data []byte) fecPacket {
+func (dec *fecDecoder) decodeBytes(data []byte) fecPacket {
 	var pkt fecPacket
 	pkt.seqid = binary.LittleEndian.Uint32(data)
 	pkt.flag = binary.LittleEndian.Uint16(data[4:])
@@ -74,8 +78,8 @@ func (dec *FECDecoder) decodeBytes(data []byte) fecPacket {
 	return pkt
 }
 
-// Decode a fec packet
-func (dec *FECDecoder) Decode(pkt fecPacket) (recovered [][]byte) {
+// decode a fec packet
+func (dec *fecDecoder) decode(pkt fecPacket) (recovered [][]byte) {
 	// insertion
 	n := len(dec.rx) - 1
 	insertIdx := 0
@@ -154,10 +158,10 @@ func (dec *FECDecoder) Decode(pkt fecPacket) (recovered [][]byte) {
 				if shards[k] != nil {
 					dlen := len(shards[k])
 					shards[k] = shards[k][:maxlen]
-					xorBytes(shards[k][dlen:], shards[k][dlen:], shards[k][dlen:])
+					copy(shards[k][dlen:], dec.zeros)
 				}
 			}
-			if err := dec.codec.Reconstruct(shards); err == nil {
+			if err := dec.codec.ReconstructData(shards); err == nil {
 				for k := range shards[:dec.dataShards] {
 					if !shardsflag[k] {
 						recovered = append(recovered, shards[k])
@@ -179,7 +183,7 @@ func (dec *FECDecoder) Decode(pkt fecPacket) (recovered [][]byte) {
 }
 
 // free a range of fecPacket, and zero for GC recycling
-func (dec *FECDecoder) freeRange(first, n int, q []fecPacket) []fecPacket {
+func (dec *fecDecoder) freeRange(first, n int, q []fecPacket) []fecPacket {
 	for i := first; i < first+n; i++ { // free
 		xmitBuf.Put(q[i].data)
 	}
@@ -191,8 +195,8 @@ func (dec *FECDecoder) freeRange(first, n int, q []fecPacket) []fecPacket {
 }
 
 type (
-	// FECEncoder for encoding outgoing packets
-	FECEncoder struct {
+	// fecEncoder for encoding outgoing packets
+	fecEncoder struct {
 		dataShards   int
 		parityShards int
 		shardSize    int
@@ -209,41 +213,45 @@ type (
 		shardCache  [][]byte
 		encodeCache [][]byte
 
+		// zeros
+		zeros []byte
+
 		// RS encoder
 		codec reedsolomon.Encoder
 	}
 )
 
-func newFECEncoder(dataShards, parityShards, offset int) *FECEncoder {
+func newFECEncoder(dataShards, parityShards, offset int) *fecEncoder {
 	if dataShards <= 0 || parityShards <= 0 {
 		return nil
 	}
-	fec := new(FECEncoder)
-	fec.dataShards = dataShards
-	fec.parityShards = parityShards
-	fec.shardSize = dataShards + parityShards
-	fec.paws = (0xffffffff/uint32(fec.shardSize) - 1) * uint32(fec.shardSize)
-	fec.headerOffset = offset
-	fec.payloadOffset = fec.headerOffset + fecHeaderSize
+	enc := new(fecEncoder)
+	enc.dataShards = dataShards
+	enc.parityShards = parityShards
+	enc.shardSize = dataShards + parityShards
+	enc.paws = (0xffffffff/uint32(enc.shardSize) - 1) * uint32(enc.shardSize)
+	enc.headerOffset = offset
+	enc.payloadOffset = enc.headerOffset + fecHeaderSize
 
-	enc, err := reedsolomon.New(dataShards, parityShards, reedsolomon.WithMaxGoroutines(1))
+	codec, err := reedsolomon.New(dataShards, parityShards)
 	if err != nil {
 		return nil
 	}
-	fec.codec = enc
+	enc.codec = codec
 
 	// caches
-	fec.encodeCache = make([][]byte, fec.shardSize)
-	fec.shardCache = make([][]byte, fec.shardSize)
-	for k := range fec.shardCache {
-		fec.shardCache[k] = make([]byte, mtuLimit)
+	enc.encodeCache = make([][]byte, enc.shardSize)
+	enc.shardCache = make([][]byte, enc.shardSize)
+	for k := range enc.shardCache {
+		enc.shardCache[k] = make([]byte, mtuLimit)
 	}
-	return fec
+	enc.zeros = make([]byte, mtuLimit)
+	return enc
 }
 
-// Encode the packet, output parity shards if we have enough datashards
-// the content of returned parityshards will change in next Encode
-func (enc *FECEncoder) Encode(b []byte) (ps [][]byte) {
+// encode the packet, output parity shards if we have enough datashards
+// the content of returned parityshards will change in next encode
+func (enc *fecEncoder) encode(b []byte) (ps [][]byte) {
 	enc.markData(b[enc.headerOffset:])
 	binary.LittleEndian.PutUint16(b[enc.payloadOffset:], uint16(len(b[enc.payloadOffset:])))
 
@@ -264,7 +272,7 @@ func (enc *FECEncoder) Encode(b []byte) (ps [][]byte) {
 		for i := 0; i < enc.dataShards; i++ {
 			shard := enc.shardCache[i]
 			slen := len(shard)
-			xorBytes(shard[slen:enc.maxSize], shard[slen:enc.maxSize], shard[slen:enc.maxSize])
+			copy(shard[slen:enc.maxSize], enc.zeros)
 		}
 
 		// construct equal-sized slice with stripped header
@@ -290,13 +298,13 @@ func (enc *FECEncoder) Encode(b []byte) (ps [][]byte) {
 	return
 }
 
-func (enc *FECEncoder) markData(data []byte) {
+func (enc *fecEncoder) markData(data []byte) {
 	binary.LittleEndian.PutUint32(data, enc.next)
 	binary.LittleEndian.PutUint16(data[4:], typeData)
 	enc.next++
 }
 
-func (enc *FECEncoder) markFEC(data []byte) {
+func (enc *fecEncoder) markFEC(data []byte) {
 	binary.LittleEndian.PutUint32(data, enc.next)
 	binary.LittleEndian.PutUint16(data[4:], typeFEC)
 	enc.next = (enc.next + 1) % enc.paws

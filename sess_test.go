@@ -256,6 +256,7 @@ func TestSendRecv(t *testing.T) {
 		panic(err)
 	}
 	cli.SetWriteDelay(true)
+	cli.SetDUP(1)
 	const N = 100
 	buf := make([]byte, 10)
 	for i := 0; i < N; i++ {
@@ -468,8 +469,10 @@ func TestListenerClose(t *testing.T) {
 	}
 
 	l.Close()
-	fakeaddr, _ := net.ResolveUDPAddr("udp6", "127.0.0.1:1111")
-	if l.closeSession(fakeaddr) {
+	if l.closeSession(sessionKey{
+		addr:   "127.0.0.1:1111",
+		convID: 1234,
+	}) {
 		t.Fail()
 	}
 }
